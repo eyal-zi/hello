@@ -22,14 +22,6 @@ export const CropperStage = styled(Box)(({ theme }) => ({
   userSelect: 'none',
   touchAction: 'none',
   cursor: 'crosshair',
-  // subtle checker so transparent images are visible
-  backgroundImage:
-    'linear-gradient(45deg, rgba(255,255,255,0.04) 25%, transparent 25%),' +
-    'linear-gradient(-45deg, rgba(255,255,255,0.04) 25%, transparent 25%),' +
-    'linear-gradient(45deg, transparent 75%, rgba(255,255,255,0.04) 75%),' +
-    'linear-gradient(-45deg, transparent 75%, rgba(255,255,255,0.04) 75%)',
-  backgroundSize: '20px 20px',
-  backgroundPosition: '0 0, 0 10px, 10px -10px, 10px 0',
 }));
 
 /**
@@ -73,24 +65,14 @@ export const MaskPiece = styled(Box)({
 
 /**
  * The selection rectangle. Border thickness is kept visually consistent
- * regardless of zoom by using vector-effect-style trick: we set the border
- * width via CSS variable that the parent updates based on the current scale.
+ * regardless of zoom by using a CSS variable that the parent updates.
  */
 export const SelectionRect = styled(Box)(({ theme }) => ({
   position: 'absolute',
-  // The visual border is drawn by an outline-style ::before pseudo so its
-  // thickness is independent of the parent transform's scale. We size it
-  // with a CSS variable --selection-border that the cropper component sets.
   outline: `var(--selection-border, 2px) solid ${theme.palette.primary.main}`,
   outlineOffset: 'calc(-1 * var(--selection-border, 2px))',
   cursor: 'move',
   boxSizing: 'border-box',
-  // Rule-of-thirds grid lines, scale-aware via background-size
-  backgroundImage:
-    'linear-gradient(to right, rgba(255,255,255,0.25) var(--selection-border, 1px), transparent var(--selection-border, 1px)),' +
-    'linear-gradient(to bottom, rgba(255,255,255,0.25) var(--selection-border, 1px), transparent var(--selection-border, 1px))',
-  backgroundSize: '33.333% 33.333%',
-  backgroundPosition: '0 0',
 }));
 
 interface HandleProps {

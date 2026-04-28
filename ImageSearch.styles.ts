@@ -27,9 +27,10 @@ export const SearchIconButton = styled(IconButton)(({ theme }) => ({
 }));
 
 export const StyledDialog = styled(Dialog)(({ theme }) => ({
+  zIndex: theme.zIndex.modal + 100,
   '& .MuiDialog-paper': {
     borderRadius: 16,
-    minWidth: 480,
+    minWidth: 520,
     [theme.breakpoints.down('sm')]: {
       minWidth: '90vw',
       margin: theme.spacing(2),

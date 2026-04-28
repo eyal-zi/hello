@@ -66,7 +66,7 @@ export const BrowseButton = styled(Button)(({ theme }) => ({
   borderRadius: 8,
 }));
 
-// Hidden file input rendered as a styled MUI Box (component="input")
-export const HiddenInput = styled(Box)({
+// Hidden file input, styled directly as an <input>
+export const HiddenInput = styled('input')({
   display: 'none',
 });

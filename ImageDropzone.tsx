@@ -100,11 +100,10 @@ const ImageDropzone: React.FC<ImageDropzoneProps> = ({
       </BrowseButton>
 
       <HiddenInput
-        component="input"
         ref={inputRef}
         type="file"
         accept={accept}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+        onChange={(e) => {
           handleFile(e.target.files?.[0]);
           // reset so selecting the same file twice still triggers change
           e.target.value = '';
