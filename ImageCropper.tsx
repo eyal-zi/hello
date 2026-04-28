@@ -20,6 +20,7 @@ import { useWheelZoom } from './hooks/useWheelZoom';
 import { useSpaceKey } from './hooks/useSpaceKey';
 import { useCropDrag } from './hooks/useCropDrag';
 import { useCropBlob } from './hooks/useCropBlob';
+import { useClearSelectionShortcut } from './hooks/useClearSelectionShortcut';
 import SelectionOverlay from './SelectionOverlay';
 import CropperToolbar from './CropperToolbar';
 
@@ -88,10 +89,24 @@ const ImageCropper: React.FC<ImageCropperProps> = ({
     onCroppedBlobChange: onCropChange,
   });
 
+  const handleClearSelection = useCallback(() => {
+    setSelectionRect(null);
+  }, [setSelectionRect]);
+
   const handleResetSelectionAndView = useCallback(() => {
     fitImageToStage();
     setSelectionRect(null);
   }, [fitImageToStage, setSelectionRect]);
+
+  const hasVisibleSelection =
+    !!selectionRect && selectionRect.width > 0 && selectionRect.height > 0;
+
+  // Backspace / Delete clears the selection (when one exists and user
+  // isn't typing in an input field).
+  useClearSelectionShortcut({
+    onClearSelection: handleClearSelection,
+    isEnabled: hasVisibleSelection,
+  });
 
   // CSS variables that counter-scale handles and borders so they keep a
   // constant on-screen size regardless of the current zoom level.
@@ -101,16 +116,15 @@ const ImageCropper: React.FC<ImageCropperProps> = ({
     ['--selection-border' as string]: `${SELECTION_BORDER_PIXELS / viewTransform.scale}px`,
   } as React.CSSProperties;
 
-  const hasVisibleSelection =
-    !!selectionRect && selectionRect.width > 0 && selectionRect.height > 0;
-
   return (
     <CropperRoot>
       <CropperToolbar
         onZoomIn={() => zoomAtStageCenter(ZOOM_STEP_FACTOR)}
         onZoomOut={() => zoomAtStageCenter(1 / ZOOM_STEP_FACTOR)}
         onFitToView={fitImageToStage}
+        onClearSelection={handleClearSelection}
         onResetSelection={handleResetSelectionAndView}
+        isClearDisabled={!hasVisibleSelection}
       />
 
       <CropperStage
@@ -170,7 +184,7 @@ const ImageCropper: React.FC<ImageCropperProps> = ({
 
       <HintText variant="body2">
         {hasVisibleSelection
-          ? 'Drag inside to move, drag handles to resize. Scroll to zoom, Space + drag to pan.'
+          ? 'Drag inside to move, drag handles to resize. Press Backspace to clear. Scroll to zoom, Space + drag to pan.'
           : 'Click and drag to draw a selection. Scroll to zoom, Space + drag to pan.'}
       </HintText>
     </CropperRoot>
