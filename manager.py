@@ -182,8 +182,16 @@ class TrackEmbeddingManager:
         frames: Sequence[np.ndarray],
         detections_per_frame: Sequence[Sequence[Dict[str, Any]]],
     ) -> None:
-        """Embed every detection in this batch in a single forward pass and
-        update the per-track top-K snapshots.
+        """Embed the worth-embedding detections in this batch in a single
+        forward pass and update the per-track top-K snapshots.
+
+        For each detection we compute its quality score *before* embedding.
+        If the detection's track already has its top-K slots filled and the
+        candidate's score is no better than the worst stored snapshot, we
+        skip the (expensive) embedding entirely and only bump the track's
+        ``num_observations`` counter. For long-lived tracks this avoids
+        running the model on the vast majority of detections after the
+        first few good ones.
 
         Args:
             frames: list of HxWx3 BGR ``uint8`` ndarrays.
@@ -197,18 +205,54 @@ class TrackEmbeddingManager:
                 f"({len(detections_per_frame)}) must have the same length"
             )
 
-        pending_crops = list(self._iter_pending_crops(frames, detections_per_frame))
+        candidates = list(self._iter_pending_crops(frames, detections_per_frame))
 
         # Always advance the global frame counter, regardless of how many
         # detections (if any) survived filtering.
         self._global_frame_counter += len(frames)
 
-        if not pending_crops:
+        if not candidates:
             return
 
-        embeddings = self.embedder.embed([crop.image for crop in pending_crops])
-        for embedding, pending in zip(embeddings, pending_crops):
+        crops_to_embed: List[PendingCrop] = []
+        skipped_track_ids: List[Any] = []
+        for candidate in candidates:
+            if self._candidate_can_improve_track(candidate):
+                crops_to_embed.append(candidate)
+            else:
+                skipped_track_ids.append(candidate.track_id)
+
+        # Skipped candidates contributed no embedding but are still
+        # observations -- count them.
+        for track_id in skipped_track_ids:
+            existing = self.tracks.get(track_id)
+            if existing is not None:
+                existing.num_observations += 1
+
+        if not crops_to_embed:
+            return
+
+        embeddings = self.embedder.embed([crop.image for crop in crops_to_embed])
+        for embedding, pending in zip(embeddings, crops_to_embed):
             self._integrate_embedding(embedding, pending)
+
+    def _candidate_can_improve_track(self, candidate: PendingCrop) -> bool:
+        """Cheap pre-embedding check: would this candidate plausibly get a
+        slot in the track's top-K snapshots?
+
+        Tracks below capacity always accept (we need the snapshots).
+        At-capacity tracks accept only if the candidate's quality score
+        beats the worst stored snapshot.
+        """
+        existing = self.tracks.get(candidate.track_id)
+        if existing is None:
+            return True
+        if len(existing.snapshots) < self.max_snapshots_per_track:
+            return True
+        worst_stored = min(
+            snapshot.quality_score for snapshot in existing.snapshots
+        )
+        return candidate.quality_score > worst_stored
 
     # -------------------------------------------------------- crop gather
 

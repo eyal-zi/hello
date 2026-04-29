@@ -3,6 +3,21 @@
 This module is deliberately framework-aware (torch, torchvision) but
 domain-agnostic: it knows nothing about tracks, detections, or storage. It
 turns a list of BGR crops into a tensor of L2-normalized embeddings.
+
+Performance notes
+-----------------
+The preprocessing pipeline is GPU-side: each variable-size BGR crop is
+uploaded as ``uint8``, then resized + colour-corrected + normalized on the
+device. For large batches (hundreds of crops) this is dramatically faster
+than CPU-side resizing because:
+
+* CPU antialiased bilinear resize is single-threaded per call and N
+  separate calls don't parallelize across cores well from Python.
+* The GPU performs all N tiny resizes concurrently (kernels queue and
+  overlap), and the H2D byte transfer of raw uint8 crops is small even for
+  hundreds of detections.
+* The float conversion + normalization run as one batched op once all
+  crops share the same shape.
 """
 from __future__ import annotations
 
@@ -11,7 +26,6 @@ from typing import List, Optional, Sequence
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torchvision.transforms import v2 as torchvision_transforms
 
 
 # ImageNet stats - DINOv3 LVD-1689M weights expect these.
@@ -36,7 +50,7 @@ class Dinov3Embedder:
         device: Optional[str] = None,
         model_name: str = "dinov3_vitb16",
         input_size: int = 224,
-        max_batch_size: int = 64,
+        max_batch_size: int = 256,
         use_amp: bool = True,
     ) -> None:
         if input_size % PATCH_SIZE != 0:
@@ -67,21 +81,9 @@ class Dinov3Embedder:
         model.eval().to(self.device)
         self.model = model
 
-        # Match the canonical DINOv3 inference preprocessing. ``antialias=True``
-        # is important: without it, downsampled crops drift measurably from
-        # the reference embeddings.
-        self._preprocessing = torchvision_transforms.Compose([
-            torchvision_transforms.ToImage(),
-            torchvision_transforms.Resize(
-                (input_size, input_size),
-                antialias=True,
-            ),
-            torchvision_transforms.ToDtype(torch.float32, scale=True),
-            torchvision_transforms.Normalize(
-                mean=IMAGENET_MEAN,
-                std=IMAGENET_STD,
-            ),
-        ])
+        # Cached normalization tensors on-device, broadcast-ready.
+        self._mean_chw = torch.tensor(IMAGENET_MEAN, device=self.device).view(1, 3, 1, 1)
+        self._std_chw = torch.tensor(IMAGENET_STD, device=self.device).view(1, 3, 1, 1)
 
         # Discovered lazily on first access.
         self._embedding_dim: Optional[int] = None
@@ -104,31 +106,63 @@ class Dinov3Embedder:
         if not bgr_crops:
             return np.empty((0, self.embedding_dim), dtype=np.float32)
 
-        batch = self._preprocess_batch(bgr_crops)
+        batch = self._preprocess_to_batch(bgr_crops)
         embeddings = self._embed_in_chunks(batch)
         return embeddings.detach().to("cpu").numpy().astype(np.float32, copy=False)
 
     # -------------------------------------------------------- preprocessing
 
-    def _preprocess_one(self, bgr_crop: np.ndarray) -> torch.Tensor:
-        """Single BGR HxWx3 ``uint8`` ndarray -> CHW float tensor on CPU."""
-        # BGR -> RGB. The slice is a non-contiguous view; the transform
-        # pipeline will copy, but we make it contiguous first to avoid a
-        # stride warning from negative-step views.
-        rgb_crop = np.ascontiguousarray(bgr_crop[:, :, ::-1])
-        return self._preprocessing(rgb_crop)
+    @torch.inference_mode()
+    def _preprocess_to_batch(
+        self, bgr_crops: Sequence[np.ndarray],
+    ) -> torch.Tensor:
+        """Turn variable-size BGR ``uint8`` crops into one normalized
+        ``(N, 3, input_size, input_size)`` float tensor on ``self.device``.
 
-    def _preprocess_batch(self, bgr_crops: Sequence[np.ndarray]) -> torch.Tensor:
-        """Stack variable-size BGR crops into a single ``(N, 3, H, W)`` tensor
-        on ``self.device``.
+        Steps, all on-device after the H2D upload:
+          1. Per-crop H2D upload as ``uint8``.
+          2. Per-crop ``F.interpolate`` resize (antialiased bilinear) into a
+             pre-allocated batch slot.
+          3. Single batched ``uint8 -> float`` cast, scale, and normalize.
 
-        Resizing happens on the CPU side so that we can stack into one tensor
-        before doing a single host-to-device copy; this avoids issuing N
-        separate ``F.interpolate`` launches on the GPU.
+        We resize each crop individually because they have different input
+        sizes, but the resize kernels run concurrently on the GPU, and the
+        only batched-shape work (the cast + normalize) is the expensive part
+        that matters for memory bandwidth.
         """
-        cpu_tensors = [self._preprocess_one(crop) for crop in bgr_crops]
-        cpu_batch = torch.stack(cpu_tensors, dim=0)
-        return cpu_batch.to(self.device, non_blocking=True)
+        n = len(bgr_crops)
+
+        # Pre-allocated uint8 batch on-device that each resize will write into.
+        # uint8 is 4x smaller than float32, saving bandwidth and VRAM.
+        resized_uint8 = torch.empty(
+            (n, 3, self.input_size, self.input_size),
+            dtype=torch.uint8,
+            device=self.device,
+        )
+
+        for i, bgr_crop in enumerate(bgr_crops):
+            # BGR -> RGB and HWC -> CHW done in numpy land before upload.
+            # The negative-stride slice is made contiguous so torch can wrap
+            # it without copying twice.
+            rgb_chw = np.ascontiguousarray(bgr_crop[:, :, ::-1].transpose(2, 0, 1))
+            crop_uint8 = torch.from_numpy(rgb_chw).to(
+                self.device, non_blocking=True,
+            )
+            # interpolate needs a 4D batch dim. antialias=True works for
+            # bilinear on CUDA in modern PyTorch.
+            resized = F.interpolate(
+                crop_uint8.unsqueeze(0),
+                size=(self.input_size, self.input_size),
+                mode="bilinear",
+                align_corners=False,
+                antialias=True,
+            )
+            resized_uint8[i] = resized.squeeze(0)
+
+        # One batched cast + normalize for all N crops.
+        batch_float = resized_uint8.float().div_(255.0)
+        batch_float.sub_(self._mean_chw).div_(self._std_chw)
+        return batch_float
 
     # ----------------------------------------------------------- inference
 
